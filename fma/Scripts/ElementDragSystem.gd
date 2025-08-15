@@ -13,6 +13,11 @@ var is_dragging: bool = false
 var transmutation_system: TransmutationSystem
 var chalk_circle_drawer: EnhancedChalkCircleDrawer
 
+# Performance optimization: texture caching
+var texture_cache: Dictionary = {}
+var last_mouse_position: Vector2 = Vector2.ZERO
+var drag_update_threshold: float = 5.0  # Minimum distance to update drag position
+
 func _ready():
 	# Don't create a new transmutation system - use the one passed from GameManager
 	# transmutation_system = TransmutationSystem.new()
@@ -39,7 +44,11 @@ func _setup_element_panel():
 	title.add_theme_font_size_override("font_size", 18)
 	element_panel.add_child(title)
 	
-	# Create element buttons
+	# Create element buttons (optimized)
+	_create_element_buttons_optimized(element_panel)
+
+func _create_element_buttons_optimized(parent: Panel):
+	"""Optimized element button creation with caching"""
 	var element_types = [
 		TransmutationSystem.ElementType.FIRE,
 		TransmutationSystem.ElementType.WATER,
@@ -62,23 +71,27 @@ func _setup_element_panel():
 	
 	for i in range(element_types.size()):
 		var element = transmutation_system.get_element_by_type(element_types[i])
-		var button = _create_element_button(element, button_size)
+		var button = _create_element_button_cached(element, button_size)
 		
 		var row = i / buttons_per_row
 		var col = i % buttons_per_row
 		button.position = start_pos + Vector2(col * (button_size.x + 5), row * (button_size.y + 5))
 		
-		element_panel.add_child(button)
+		parent.add_child(button)
 		element_buttons.append(button)
 
-func _create_element_button(element: TransmutationSystem.Element, size: Vector2) -> Button:
+func _create_element_button_cached(element: TransmutationSystem.Element, size: Vector2) -> Button:
+	"""Optimized button creation with texture caching"""
 	var button = Button.new()
 	button.size = size
 	button.tooltip_text = element.name + ": " + element.description
 	
-	# Create element texture
-	var texture = _create_element_button_texture(element.color)
-	button.icon = texture
+	# Use cached texture if available
+	var cache_key = str(element.type) + "_" + str(size)
+	if cache_key not in texture_cache:
+		texture_cache[cache_key] = _create_element_button_texture(element.color)
+	
+	button.icon = texture_cache[cache_key]
 	
 	# Connect button press
 	button.button_down.connect(func(): _start_drag(element))
@@ -89,44 +102,58 @@ func _create_element_button(element: TransmutationSystem.Element, size: Vector2)
 	return button
 
 func _create_element_button_texture(color: Color) -> Texture2D:
-	var image = Image.create(32, 32, false, Image.FORMAT_RGBA8)
+	"""Optimized texture creation - smaller size for better performance"""
+	var image = Image.create(24, 24, false, Image.FORMAT_RGBA8)  # Reduced from 32x32
 	image.fill(Color.TRANSPARENT)
 	
-	# Draw element symbol
-	for x in range(32):
-		for y in range(32):
-			var distance = Vector2(x - 16, y - 16).length()
-			if distance <= 14:
-				var alpha = 1.0 - (distance / 14.0)
+	# Draw element symbol (optimized circle drawing)
+	var center = Vector2(12, 12)
+	var radius = 10
+	
+	for x in range(24):
+		for y in range(24):
+			var distance = Vector2(x, y).distance_to(center)
+			if distance <= radius:
+				var alpha = 1.0 - (distance / radius) * 0.3
 				image.set_pixel(x, y, Color(color.r, color.g, color.b, alpha))
 	
 	return ImageTexture.create_from_image(image)
 
 func _start_drag(element: TransmutationSystem.Element):
+	"""Optimized drag start with cached sprite creation"""
+	if is_dragging:
+		return  # Already dragging something
+	
 	dragged_element = element
 	is_dragging = true
 	
-	# Create drag sprite
+	# Create drag sprite (use cached texture)
 	drag_sprite = Sprite2D.new()
-	drag_sprite.texture = _create_element_button_texture(element.color)
-	drag_sprite.modulate = Color(1, 1, 1, 0.8)
-	drag_sprite.z_index = 1000
-	get_tree().current_scene.add_child(drag_sprite)
+	var cache_key = str(element.type) + "_drag"
+	if cache_key not in texture_cache:
+		texture_cache[cache_key] = _create_drag_texture(element.color)
+	
+	drag_sprite.texture = texture_cache[cache_key]
+	drag_sprite.z_index = 100  # Ensure it's on top
+	add_child(drag_sprite)
 	
 	# Set initial position
-	var mouse_pos = get_global_mouse_position()
-	drag_sprite.position = mouse_pos - drag_offset
+	last_mouse_position = get_global_mouse_position()
+	drag_sprite.global_position = last_mouse_position - drag_offset
 
 func _unhandled_input(event):
-	if not is_dragging or not drag_sprite:
-		return
-	
-	if event is InputEventMouseMotion:
-		drag_sprite.position = event.position - drag_offset
-	
-	elif event is InputEventMouseButton:
-		if event.button_index == MOUSE_BUTTON_LEFT and not event.pressed:
-			_end_drag(event.position)
+	if is_dragging:
+		if event is InputEventMouseMotion:
+			# Performance optimization: only update if moved significantly
+			var new_position = event.position
+			if new_position.distance_to(last_mouse_position) > drag_update_threshold:
+				if drag_sprite:
+					drag_sprite.global_position = new_position - drag_offset
+				last_mouse_position = new_position
+		
+		elif event is InputEventMouseButton:
+			if event.button_index == MOUSE_BUTTON_LEFT and not event.pressed:
+				_end_drag(event.position)
 
 
 
@@ -177,3 +204,41 @@ func set_transmutation_system(system: TransmutationSystem):
 
 func get_transmutation_system() -> TransmutationSystem:
 	return transmutation_system
+
+func _create_drag_texture(color: Color) -> Texture2D:
+	"""Create drag texture (slightly larger and with glow effect)"""
+	var image = Image.create(48, 48, false, Image.FORMAT_RGBA8)
+	image.fill(Color.TRANSPARENT)
+	
+	var center = Vector2(24, 24)
+	var radius = 20
+	
+	# Draw with glow effect
+	for x in range(48):
+		for y in range(48):
+			var distance = Vector2(x, y).distance_to(center)
+			if distance <= radius:
+				var alpha = 1.0 - (distance / radius) * 0.5
+				var glow_color = Color(color.r * 1.2, color.g * 1.2, color.b * 1.2, alpha)
+				image.set_pixel(x, y, glow_color)
+	
+	return ImageTexture.create_from_image(image)
+
+func cleanup_texture_cache():
+	"""Clean up texture cache to free memory"""
+	var cache_size_before = texture_cache.size()
+	
+	# Keep only the most frequently used textures
+	# In a more sophisticated implementation, we could track usage frequency
+	if texture_cache.size() > 20:
+		var keys_to_remove = []
+		var count = 0
+		for key in texture_cache.keys():
+			if count > 10:  # Keep only first 10 entries
+				keys_to_remove.append(key)
+			count += 1
+		
+		for key in keys_to_remove:
+			texture_cache.erase(key)
+	
+	print("Texture cache cleanup: ", cache_size_before, " -> ", texture_cache.size(), " entries")

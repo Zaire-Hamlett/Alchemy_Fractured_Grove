@@ -12,10 +12,116 @@ var transmutation_system: TransmutationSystem
 var status_label: Label
 var instructions_label: Label
 
+# Performance optimization: Object pooling
+var label_pool: Array[Label] = []
+var button_pool: Array[Button] = []
+var sprite_pool: Array[Sprite2D] = []
+var max_pool_size: int = 50
+
+# Memory management
+var last_memory_cleanup: float = 0.0
+var memory_cleanup_interval: float = 30.0  # Clean up every 30 seconds
+
 func _ready():
 	_setup_game_systems()
 	_setup_ui()
 	_connect_signals()
+	_initialize_object_pools()
+
+func _process(delta):
+	# Periodic memory cleanup
+	last_memory_cleanup += delta
+	if last_memory_cleanup >= memory_cleanup_interval:
+		_cleanup_memory()
+		last_memory_cleanup = 0.0
+
+func _initialize_object_pools():
+	"""Initialize object pools for better memory management"""
+	# Pre-allocate some objects for common operations
+	for i in range(10):
+		var label = Label.new()
+		label.visible = false
+		label_pool.append(label)
+		add_child(label)
+		
+		var button = Button.new()
+		button.visible = false
+		button_pool.append(button)
+		add_child(button)
+		
+		var sprite = Sprite2D.new()
+		sprite.visible = false
+		sprite_pool.append(sprite)
+		add_child(sprite)
+
+func get_pooled_label() -> Label:
+	"""Get a label from the pool or create new one if needed"""
+	for label in label_pool:
+		if not label.visible:
+			label.visible = true
+			return label
+	
+	# Pool exhausted, create new one (but don't exceed max size)
+	if label_pool.size() < max_pool_size:
+		var label = Label.new()
+		label_pool.append(label)
+		add_child(label)
+		return label
+	
+	# Reuse oldest one
+	var label = label_pool[0]
+	label_pool.erase(label)
+	label_pool.append(label)
+	return label
+
+func return_pooled_label(label: Label):
+	"""Return a label to the pool"""
+	label.visible = false
+	label.text = ""
+	label.position = Vector2.ZERO
+	label.modulate = Color.WHITE
+
+func get_pooled_sprite() -> Sprite2D:
+	"""Get a sprite from the pool or create new one if needed"""
+	for sprite in sprite_pool:
+		if not sprite.visible:
+			sprite.visible = true
+			return sprite
+	
+	# Pool exhausted, create new one (but don't exceed max size)
+	if sprite_pool.size() < max_pool_size:
+		var sprite = Sprite2D.new()
+		sprite_pool.append(sprite)
+		add_child(sprite)
+		return sprite
+	
+	# Reuse oldest one
+	var sprite = sprite_pool[0]
+	sprite_pool.erase(sprite)
+	sprite_pool.append(sprite)
+	return sprite
+
+func return_pooled_sprite(sprite: Sprite2D):
+	"""Return a sprite to the pool"""
+	sprite.visible = false
+	sprite.texture = null
+	sprite.position = Vector2.ZERO
+	sprite.modulate = Color.WHITE
+
+func _cleanup_memory():
+	"""Periodic memory cleanup"""
+	# Force garbage collection
+	if Engine.has_method("force_garbage_collection"):
+		Engine.force_garbage_collection()
+	
+	# Clean up cached textures in systems
+	if element_drag_system and element_drag_system.has_method("cleanup_texture_cache"):
+		element_drag_system.cleanup_texture_cache()
+	
+	if chalk_circle_drawer and chalk_circle_drawer.has_method("cleanup_cache"):
+		chalk_circle_drawer.cleanup_cache()
+	
+	print("Memory cleanup performed")
 
 func _setup_game_systems():
 	# Create chalk circle drawer

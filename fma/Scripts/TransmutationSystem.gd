@@ -5,8 +5,11 @@ signal transmutation_completed(recipe: Recipe, result: Item)
 signal element_added(element: Element)
 signal inventory_updated()
 
-# Recipe database
+# Recipe database - optimized with lookup tables
 var recipes: Array[Recipe] = []
+var recipes_by_element: Dictionary = {}  # element_type -> Array[Recipe]
+var recipes_by_first_element: Dictionary = {}  # first_element -> Array[Recipe]
+var element_cache: Dictionary = {}  # element_type -> Element
 var active_recipe: Recipe = null
 var transmutation_in_progress: bool = false
 var added_elements: Array[ElementType] = []  # Track which elements have been added
@@ -139,9 +142,18 @@ class Recipe:
 		success_rate = rate
 
 func _ready():
-	_setup_recipes()
+	_initialize_elements()
+	_initialize_recipes()
+	_build_lookup_tables()
 
-func _setup_recipes():
+func _initialize_elements():
+	"""Pre-cache all elements for faster access"""
+	element_cache.clear()
+	for element_type in ElementType.values():
+		var element = Element.new(element_type)
+		element_cache[element_type] = element
+
+func _initialize_recipes():
 	print("Setting up recipes...")
 	# Create basic items from the recipe table
 	var stone_block = Item.new("Stone Block", "Stone remembers every step.", ItemRarity.COMMON)
@@ -232,25 +244,50 @@ func _setup_recipes():
 	for recipe in recipes:
 		print("  - ", recipe.name, " (", recipe.required_elements.size(), " elements)")
 
+func _build_lookup_tables():
+	"""Build optimized lookup tables for faster recipe matching"""
+	recipes_by_element.clear()
+	recipes_by_first_element.clear()
+	
+	for recipe in recipes:
+		# Build element lookup table
+		for element_type in recipe.required_elements:
+			if element_type not in recipes_by_element:
+				recipes_by_element[element_type] = []
+			if recipe not in recipes_by_element[element_type]:
+				recipes_by_element[element_type].append(recipe)
+		
+		# Build first element lookup table
+		if recipe.required_elements.size() > 0:
+			var first_element = recipe.required_elements[0]
+			if first_element not in recipes_by_first_element:
+				recipes_by_first_element[first_element] = []
+			recipes_by_first_element[first_element].append(recipe)
+
 func add_element_to_circle(element: Element, circle_center: Vector2):
 	print("Adding element: ", element.name, " (", element.type, ")")
 	print("Current state - Active recipe: ", active_recipe.name if active_recipe else "None", ", Added elements: ", added_elements, ", In progress: ", transmutation_in_progress)
 	print("Active recipe object: ", active_recipe)
 	
-	# If no active recipe, find one that matches this element
+	# If no active recipe, find one that matches this element (optimized)
 	if active_recipe == null:
 		print("No active recipe, searching for matching recipe...")
+		
+		# Use lookup table for faster recipe finding
+		var matching_recipes = recipes_by_element.get(element.type, [])
+		if matching_recipes.is_empty():
+			print("No matching recipe found for element: ", element.name)
+			return false
 		
 		# First, look for recipes that require multiple instances of this element
 		var best_recipe = null
 		var max_element_count = 0
 		
-		for recipe in recipes:
-			if element.type in recipe.required_elements:
-				var element_count = recipe.required_elements.count(element.type)
-				if element_count > max_element_count:
-					max_element_count = element_count
-					best_recipe = recipe
+		for recipe in matching_recipes:
+			var element_count = recipe.required_elements.count(element.type)
+			if element_count > max_element_count:
+				max_element_count = element_count
+				best_recipe = recipe
 		
 		# If we found a recipe with multiple instances, use it
 		if best_recipe and max_element_count > 1:
@@ -262,20 +299,22 @@ func add_element_to_circle(element: Element, circle_center: Vector2):
 			_start_transmutation_animation(circle_center, element)
 			return true
 		
-		# Otherwise, use the first matching recipe (original behavior)
-		for recipe in recipes:
-			if element.type in recipe.required_elements:
-				print("Found matching recipe: ", recipe.name)
-				active_recipe = recipe
-				added_elements.clear()
-				added_elements.append(element.type)
-				element_added.emit(element)
-				_start_transmutation_animation(circle_center, element)
-				return true
-		print("No matching recipe found for element: ", element.name)
+		# Otherwise, use the first matching recipe (prioritize by difficulty/rarity)
+		var sorted_recipes = matching_recipes.duplicate()
+		sorted_recipes.sort_custom(func(a, b): return a.difficulty < b.difficulty)
+		
+		if sorted_recipes.size() > 0:
+			print("Found matching recipe: ", sorted_recipes[0].name)
+			active_recipe = sorted_recipes[0]
+			added_elements.clear()
+			added_elements.append(element.type)
+			element_added.emit(element)
+			_start_transmutation_animation(circle_center, element)
+			return true
+		
 		return false
 	
-	# If we have an active recipe, check if this element is needed
+	# If we have an active recipe, check if this element is needed (optimized)
 	if element.type in active_recipe.required_elements:
 		# Check if we can add more of this element type
 		var current_count = added_elements.count(element.type)
@@ -291,8 +330,8 @@ func add_element_to_circle(element: Element, circle_center: Vector2):
 		element_added.emit(element)
 		_continue_transmutation_animation(circle_center, element)
 		
-		# Check if we have all required elements
-		if _check_recipe_completion():
+		# Check if we have all required elements (optimized)
+		if _check_recipe_completion_optimized():
 			print("Recipe complete! Completing transmutation...")
 			_complete_transmutation(circle_center)
 		
@@ -301,13 +340,28 @@ func add_element_to_circle(element: Element, circle_center: Vector2):
 	print("Element not needed for current recipe: ", element.name)
 	return false
 
-func _check_recipe_completion() -> bool:
-	if active_recipe == null:
+func _check_recipe_completion_optimized() -> bool:
+	"""Optimized recipe completion check using counters"""
+	if not active_recipe:
 		return false
 	
-	# Check if we have all required elements
-	for required_element in active_recipe.required_elements:
-		if required_element not in added_elements:
+	# Count required vs added elements
+	var required_counts: Dictionary = {}
+	var added_counts: Dictionary = {}
+	
+	# Count required elements
+	for element_type in active_recipe.required_elements:
+		required_counts[element_type] = required_counts.get(element_type, 0) + 1
+	
+	# Count added elements
+	for element_type in added_elements:
+		added_counts[element_type] = added_counts.get(element_type, 0) + 1
+	
+	# Check if all requirements are met
+	for element_type in required_counts:
+		var required = required_counts[element_type]
+		var added = added_counts.get(element_type, 0)
+		if added < required:
 			return false
 	
 	return true
@@ -514,8 +568,9 @@ func get_active_recipe() -> Recipe:
 func is_transmutation_in_progress() -> bool:
 	return transmutation_in_progress
 
-func get_element_by_type(type: ElementType) -> Element:
-	return Element.new(type)
+func get_element_by_type(element_type: ElementType) -> Element:
+	"""Optimized element retrieval using cache"""
+	return element_cache.get(element_type, null)
 
 func reset_transmutation():
 	print("Resetting transmutation system...")
