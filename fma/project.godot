@@ -19,3 +19,14 @@ config/icon="res://icon.svg"
 
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
+textures/canvas_textures/default_texture_filter=2
+textures/vram_compression/import_etc2_astc=true
+
+[memory]
+
+limits/message_queue/max_size_kb=4096
+multithread/thread_safety_checks=false
+
+[performance]
+
+max_fps=60

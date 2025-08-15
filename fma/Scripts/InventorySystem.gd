@@ -12,10 +12,24 @@ var inventory_items: Array[TransmutationSystem.Item] = []
 var selected_item: TransmutationSystem.Item = null
 var transmutation_system: TransmutationSystem
 
+# Performance optimization
+var ui_update_timer: float = 0.0
+var ui_update_interval: float = 0.1  # Update UI every 100ms instead of every frame
+var dirty_ui: bool = false
+var cached_item_info: Dictionary = {}
+
 func _ready():
 	# Wait for viewport to be ready
 	await get_tree().process_frame
 	_setup_inventory_ui()
+
+func _process(delta):
+	# Throttled UI updates for better performance
+	ui_update_timer += delta
+	if ui_update_timer >= ui_update_interval and dirty_ui:
+		_update_ui_display()
+		dirty_ui = false
+		ui_update_timer = 0.0
 
 func _setup_inventory_ui():
 	# Create inventory panel
@@ -32,27 +46,47 @@ func _setup_inventory_ui():
 	title.add_theme_font_size_override("font_size", 18)
 	inventory_panel.add_child(title)
 	
-	# Create inventory slots
+	# Create inventory slots (optimized)
+	_create_inventory_slots_optimized(inventory_panel)
+	
+	# Create item info panel (optimized)
+	_create_item_info_panel()
+
+func _create_inventory_slots_optimized(parent: Panel):
+	"""Optimized inventory slot creation"""
 	var slots_per_row = 6
 	var start_pos = Vector2(10, 40)
 	
 	for i in range(inventory_size):
-		var slot = _create_inventory_slot(i)
+		var slot = _create_inventory_slot_optimized(i)
 		
 		var row = i / slots_per_row
 		var col = i % slots_per_row
 		slot.position = start_pos + Vector2(col * (slot_size.x + 5), row * (slot_size.y + 5))
 		
-		inventory_panel.add_child(slot)
+		parent.add_child(slot)
 		inventory_slots.append(slot)
+
+func _create_inventory_slot_optimized(index: int) -> Button:
+	"""Optimized slot creation with better event handling"""
+	var slot = Button.new()
+	slot.size = slot_size
+	slot.name = "Slot" + str(index)
+	slot.mouse_filter = Control.MOUSE_FILTER_STOP
 	
-	# Create item info panel
+	# Connect slot click with optimized callback
+	slot.pressed.connect(_on_slot_clicked.bind(index), CONNECT_DEFERRED)
+	
+	return slot
+
+func _create_item_info_panel():
+	"""Create optimized item info panel"""
 	var info_panel = Panel.new()
 	info_panel.size = Vector2(200, 150)
 	info_panel.position = Vector2(10, get_viewport().size.y - 160)
 	add_child(info_panel)
 	
-	# Item info labels
+	# Item info labels (cached for reuse)
 	var info_title = Label.new()
 	info_title.text = "Item Info"
 	info_title.position = Vector2(10, 10)
@@ -79,35 +113,39 @@ func _setup_inventory_ui():
 	item_rarity_label.position = Vector2(10, 120)
 	info_panel.add_child(item_rarity_label)
 
-func _create_inventory_slot(index: int) -> Button:
-	var slot = Button.new()
-	slot.size = slot_size
-	slot.name = "Slot" + str(index)
-	slot.mouse_filter = Control.MOUSE_FILTER_STOP
-	
-	# Connect slot click
-	slot.pressed.connect(func(): _on_slot_clicked(index))
-	
-	return slot
-
 func _on_slot_clicked(index: int):
+	"""Optimized slot click handling"""
 	if index < inventory_items.size() and inventory_items[index]:
 		selected_item = inventory_items[index]
-		_update_item_info(selected_item)
+		_update_item_info_cached(selected_item)
 		item_selected.emit(selected_item)
 
-func _update_item_info(item: TransmutationSystem.Item):
+func _update_item_info_cached(item: TransmutationSystem.Item):
+	"""Optimized item info update with caching"""
+	var cache_key = item.name + "_" + str(item.rarity)
+	
+	if cache_key not in cached_item_info:
+		# Cache the item display info
+		cached_item_info[cache_key] = {
+			"name": item.name,
+			"description": item.description,
+			"rarity_text": _get_rarity_text(item.rarity),
+			"rarity_color": _get_rarity_color(item.rarity)
+		}
+	
+	var info = cached_item_info[cache_key]
+	
 	var name_label = find_child("ItemName", true, false)
 	var desc_label = find_child("ItemDesc", true, false)
 	var rarity_label = find_child("ItemRarity", true, false)
 	
 	if name_label:
-		name_label.text = item.name
+		name_label.text = info.name
 	if desc_label:
-		desc_label.text = item.description
+		desc_label.text = info.description
 	if rarity_label:
-		rarity_label.text = "Rarity: " + _get_rarity_name(item.rarity)
-		rarity_label.modulate = _get_rarity_color(item.rarity)
+		rarity_label.text = info.rarity_text
+		rarity_label.modulate = info.rarity_color
 
 func _get_rarity_name(rarity: TransmutationSystem.ItemRarity) -> String:
 	match rarity:
@@ -139,12 +177,16 @@ func _get_rarity_color(rarity: TransmutationSystem.ItemRarity) -> Color:
 		_:
 			return Color.WHITE
 
-func add_item(item: TransmutationSystem.Item):
-	if inventory_items.size() < inventory_size:
-		inventory_items.append(item)
-		_update_inventory_display()
-		return true
-	return false
+func add_item(item: TransmutationSystem.Item) -> bool:
+	"""Optimized item addition"""
+	if inventory_items.size() >= inventory_size:
+		print("Inventory full!")
+		return false
+	
+	inventory_items.append(item)
+	dirty_ui = true  # Mark UI as needing update
+	inventory_updated.emit()
+	return true
 
 func remove_item(index: int):
 	if index >= 0 and index < inventory_items.size():
@@ -153,29 +195,17 @@ func remove_item(index: int):
 		return true
 	return false
 
-func _update_inventory_display():
-	# Clear all slots
-	for slot in inventory_slots:
-		slot.icon = null
-		slot.text = ""
-		slot.modulate = Color.WHITE
-	
-	# Update slots with items
-	for i in range(inventory_items.size()):
-		if i < inventory_slots.size():
+func _update_ui_display():
+	"""Optimized UI display update"""
+	for i in range(inventory_slots.size()):
+		var slot = inventory_slots[i]
+		if i < inventory_items.size() and inventory_items[i]:
 			var item = inventory_items[i]
-			var slot = inventory_slots[i]
-			
-			# Create item texture
-			var item_texture = _create_item_texture(item)
-			slot.icon = item_texture
-			
-			# Set rarity color
+			slot.text = item.name
 			slot.modulate = _get_rarity_color(item.rarity)
-			
-			# Show stack size if > 1
-			if item.stack_size > 1:
-				slot.text = str(item.stack_size)
+		else:
+			slot.text = ""
+			slot.modulate = Color.WHITE
 
 func _create_item_texture(item: TransmutationSystem.Item) -> Texture2D:
 	var image = Image.create(32, 32, false, Image.FORMAT_RGBA8)

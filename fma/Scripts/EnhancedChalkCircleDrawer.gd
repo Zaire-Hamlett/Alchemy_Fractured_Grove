@@ -19,12 +19,23 @@ signal circle_progress(progress: float)
 @export var auto_complete_key: String = "e"
 @export var circle_cooldown_time: float = 3.0  # Seconds before circle can be redrawn
 
+# Performance optimization settings
+@export var max_points: int = 200  # Limit total points for performance
+@export var point_distance_threshold: float = 8.0  # Minimum distance between points
+@export var update_frequency: int = 3  # Update line every N frames instead of every frame
+
 var drawing_points: Array[Vector2] = []
 var is_drawing: bool = false
 var start_point: Vector2
 var current_line: Line2D
 var smoothed_points: Array[Vector2] = []
 var chalk_texture_generator: ChalkTexture
+
+# Performance optimization variables
+var frame_count: int = 0
+var last_point: Vector2 = Vector2.ZERO
+var cached_circle_info: Dictionary = {}
+var dirty_line: bool = false
 
 # Cooldown system
 var circle_cooldown_timer: float = 0.0
@@ -96,22 +107,29 @@ func _ready():
 	_create_initial_guide()
 
 func _process(delta):
+	# Performance optimization: reduce update frequency
+	frame_count += 1
+	if frame_count % update_frequency != 0:
+		return
+	
 	# Handle cooldown timer
 	if is_in_cooldown:
-		circle_cooldown_timer += delta
-		if circle_cooldown_timer >= circle_cooldown_time:
+		circle_cooldown_timer -= delta * update_frequency
+		if circle_cooldown_timer <= 0.0:
 			is_in_cooldown = false
-			circle_cooldown_timer = 0.0
-			# Don't automatically clear the circle when cooldown ends
-			# Let the user keep using it for transmutation
-			print("Circle cooldown ended - circle ready for new drawing or continued use")
+			print("Circle cooldown ended")
 	
-	# Handle continuous E key auto-completion (only when not using mouse)
+	# Handle auto-completion with E key
 	if e_key_pressed and is_drawing and not using_mouse_input:
-		auto_complete_timer += delta
+		auto_complete_timer += delta * update_frequency
 		if auto_complete_timer >= auto_complete_delay:
-			auto_complete_timer = 0.0
 			_auto_complete_step()
+			auto_complete_timer = 0.0
+	
+	# Update line if dirty (performance optimization)
+	if dirty_line:
+		_update_line_optimized()
+		dirty_line = false
 
 func _input(event):
 	# Handle touch input
@@ -139,6 +157,8 @@ func _handle_touch_event(event: InputEventScreenTouch):
 func _handle_drag_event(event: InputEventScreenDrag):
 	if is_drawing:
 		_add_point(event.position)
+		_check_circle_progress()
+		_check_circle_completion()
 
 func _handle_mouse_event(event: InputEventMouseButton):
 	if event.button_index == MOUSE_BUTTON_LEFT:
@@ -151,6 +171,8 @@ func _handle_mouse_event(event: InputEventMouseButton):
 func _handle_mouse_motion(event: InputEventMouseMotion):
 	if is_drawing and using_mouse_input:
 		_add_point(to_local(event.position))
+		_check_circle_progress()
+		_check_circle_completion()
 
 func _handle_keyboard_event(event: InputEventKey):
 	if event.keycode == KEY_E:
@@ -312,22 +334,36 @@ func _start_drawing(position: Vector2):
 	
 	drawing_started.emit()
 
-func _add_point(position: Vector2):
-	if not is_drawing:
-		return
+func _add_point(point: Vector2):
+	# Performance optimization: check distance threshold
+	if drawing_points.size() > 0:
+		var distance = point.distance_to(last_point)
+		if distance < point_distance_threshold:
+			return  # Skip points that are too close
 	
-	drawing_points.append(position)
+	# Performance optimization: limit total points
+	if drawing_points.size() >= max_points:
+		# Remove oldest points to maintain performance
+		drawing_points = drawing_points.slice(max_points / 4, drawing_points.size())
+		smoothed_points = smoothed_points.slice(max_points / 4, smoothed_points.size())
+	
+	drawing_points.append(point)
+	last_point = point
 	
 	# Apply smoothing
-	var smoothed_point = _smooth_point(position)
+	var smoothed_point = point
+	if smoothed_points.size() > 0:
+		var prev_point = smoothed_points[-1]
+		smoothed_point = prev_point.lerp(point, smoothing_factor)
+	
 	smoothed_points.append(smoothed_point)
 	
-	# Emit chalk dust particles
-	_emit_chalk_dust(position)
+	# Mark line as dirty instead of updating immediately
+	dirty_line = true
 	
-	_update_line()
-	_check_circle_progress()
-	_check_circle_completion()
+	# Performance optimization: only emit particles occasionally
+	if drawing_points.size() % 3 == 0:
+		_emit_chalk_dust(point)
 
 func _smooth_point(new_point: Vector2) -> Vector2:
 	if smoothed_points.size() == 0:
@@ -352,6 +388,23 @@ func _update_line():
 	current_line.clear_points()
 	for point in smoothed_points:
 		current_line.add_point(point)
+
+func _update_line_optimized():
+	"""Optimized line update that processes points in batches"""
+	if smoothed_points.size() < 2:
+		return
+	
+	# Clear and rebuild line more efficiently
+	current_line.clear_points()
+	
+	# Add points in larger steps for better performance
+	var step = max(1, smoothed_points.size() / 100)  # Limit to 100 points max
+	for i in range(0, smoothed_points.size(), step):
+		current_line.add_point(smoothed_points[i])
+	
+	# Always add the last point
+	if smoothed_points.size() > 1:
+		current_line.add_point(smoothed_points[-1])
 
 func _check_circle_progress():
 	if drawing_points.size() < 5:
@@ -397,6 +450,35 @@ func _calculate_drawn_angle(points: Array[Vector2], center: Vector2) -> float:
 	
 	return total_angle
 
+func _calculate_drawn_angle_optimized(points: Array[Vector2], center: Vector2) -> float:
+	"""Optimized angle calculation using fewer points"""
+	if points.size() < 6:
+		return 0.0
+	
+	# Sample every 5th point for performance
+	var angles: Array[float] = []
+	var step = max(1, points.size() / 30)  # Limit to 30 sample points
+	
+	for i in range(0, points.size(), step):
+		var relative_pos = points[i] - center
+		angles.append(atan2(relative_pos.y, relative_pos.x))
+	
+	if angles.size() < 2:
+		return 0.0
+	
+	# Calculate total angle traversed
+	var total_angle = 0.0
+	for i in range(1, angles.size()):
+		var angle_diff = angles[i] - angles[i-1]
+		# Normalize angle difference to [-PI, PI]
+		while angle_diff > PI:
+			angle_diff -= 2.0 * PI
+		while angle_diff < -PI:
+			angle_diff += 2.0 * PI
+		total_angle += abs(angle_diff)
+	
+	return total_angle
+
 func _update_progress_indicator(center: Vector2, radius: float, progress: float):
 	# Keep the guide circle as a full, transparent circle - don't show progress here
 	# Progress is shown by the actual drawing line
@@ -426,7 +508,7 @@ func _auto_complete_step():
 	# Add the point
 	drawing_points.append(next_point)
 	smoothed_points.append(next_point)
-	_update_line()
+	dirty_line = true
 	
 	# Check if we've completed a full circle (simpler logic)
 	if drawing_points.size() > 30:
@@ -503,28 +585,89 @@ func _end_drawing():
 	drawing_ended.emit()
 
 func _check_circle_completion():
+	"""Optimized circle completion check with caching"""
 	if drawing_points.size() < 10:
 		return
 	
-	# Calculate potential circle parameters
-	var result = _fit_circle_to_points(drawing_points)
-	if result.success:
-		var center = result.center
-		var radius = result.radius
-		# Check if the circle is reasonable
-		if radius >= min_circle_radius and radius <= max_circle_radius:
-			# Check if start and end points are close
-			var start_dist = drawing_points[0].distance_to(drawing_points[-1])
-			var circle_circumference = 2.0 * PI * radius
-			var completion_ratio = start_dist / circle_circumference
-			
-			if completion_ratio <= completion_threshold:
-				# Check if points form a reasonable circle
-				var circle_score = _calculate_circle_score(drawing_points, center, radius)
-				if circle_score >= 0.75:  # 75% circle quality threshold
-					circle_center = center
-					circle_radius = radius
-					is_circle_complete = true
+	# Performance optimization: cache expensive calculations
+	var cache_key = str(drawing_points.size())
+	if cache_key in cached_circle_info and drawing_points.size() % 10 != 0:
+		# Use cached result for intermediate checks
+		var cached_result = cached_circle_info[cache_key]
+		current_progress = cached_result.get("progress", 0.0)
+		return
+	
+	# Only do full calculation every 10 points or when needed
+	var best_fit = _find_best_circle_fit_optimized()
+	if not best_fit:
+		return
+	
+	var center = best_fit.center
+	var radius = best_fit.radius
+	
+	# Cache the result
+	cached_circle_info[cache_key] = {
+		"center": center,
+		"radius": radius,
+		"progress": current_progress
+	}
+	
+	# Check if radius is within acceptable range
+	if radius < min_circle_radius or radius > max_circle_radius:
+		return
+	
+	# Calculate completion percentage (optimized)
+	var total_angle = _calculate_drawn_angle_optimized(drawing_points, center)
+	current_progress = total_angle / (2.0 * PI)
+	circle_progress.emit(current_progress)
+	
+	# Check for completion
+	if current_progress >= (1.0 - completion_threshold):
+		if _check_circle_closure_optimized(center, radius):
+			circle_center = center
+			circle_radius = radius
+			is_circle_complete = true
+			current_progress = 1.0
+
+func _find_best_circle_fit_optimized() -> Dictionary:
+	"""Optimized circle fitting using fewer sample points"""
+	if drawing_points.size() < 6:
+		return {}
+	
+	# Use every 3rd point for faster calculation
+	var sample_points: Array[Vector2] = []
+	var step = max(1, drawing_points.size() / 20)  # Limit to 20 sample points
+	for i in range(0, drawing_points.size(), step):
+		sample_points.append(drawing_points[i])
+	
+	if sample_points.size() < 3:
+		return {}
+	
+	# Calculate centroid (faster than full least squares)
+	var centroid = Vector2.ZERO
+	for point in sample_points:
+		centroid += point
+	centroid /= sample_points.size()
+	
+	# Calculate average radius
+	var total_radius = 0.0
+	for point in sample_points:
+		total_radius += point.distance_to(centroid)
+	var avg_radius = total_radius / sample_points.size()
+	
+	return {"center": centroid, "radius": avg_radius}
+
+func _check_circle_closure_optimized(center: Vector2, radius: float) -> bool:
+	"""Optimized closure check"""
+	if drawing_points.size() < 20:
+		return false
+	
+	var start_point = drawing_points[0]
+	var end_point = drawing_points[-1]
+	var closure_distance = start_point.distance_to(end_point)
+	var threshold_distance = radius * completion_threshold
+	
+	return closure_distance <= threshold_distance
 
 func _start_cooldown():
 	is_in_cooldown = true
@@ -670,3 +813,19 @@ func set_guide_circle_radius(radius: float):
 
 func set_guide_circle_position(position: Vector2):
 	progress_indicator.position = position
+
+func cleanup_cache():
+	"""Clean up cached data to free memory"""
+	var cache_size_before = cached_circle_info.size()
+	
+	# Clear old cached circle info (keep only recent entries)
+	if cached_circle_info.size() > 50:
+		cached_circle_info.clear()
+	
+	# Clean up point arrays if they get too large
+	if drawing_points.size() > max_points * 2:
+		drawing_points = drawing_points.slice(drawing_points.size() - max_points, drawing_points.size())
+		smoothed_points = smoothed_points.slice(smoothed_points.size() - max_points, smoothed_points.size())
+	
+	print("Circle cache cleanup: ", cache_size_before, " -> ", cached_circle_info.size(), " entries")
+	print("Point arrays: drawing=", drawing_points.size(), " smoothed=", smoothed_points.size())
